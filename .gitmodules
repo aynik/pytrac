@@ -1,0 +1,3 @@
+[submodule "atracdenc"]
+	path = atracdenc
+	url = https://github.com/aynik/atracdenc.git

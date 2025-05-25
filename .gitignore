@@ -1,0 +1,38 @@
+/cmake-build-release
+/cmake-build-debug
+/audio
+
+# Python build artifacts
+/build/
+/dist/
+*.egg-info/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dll
+*.dylib
+
+# Python bindings specific
+/python/*.so
+/python/build/
+/python/dist/
+/python/*.egg-info/
+
+# Python venv
+/venv/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude
