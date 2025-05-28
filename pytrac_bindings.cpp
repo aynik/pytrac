@@ -344,11 +344,14 @@ public:
                 }
             }
             
-            // Compressed Data Per Channel (std::vector<uint8_t> to std::vector<char>)
-            result.compressedDataPerChannel[ch].assign(
-                cpp_ch_data.frame_bitstream_payload.begin(),
-                cpp_ch_data.frame_bitstream_payload.end()
-            );
+            // Compressed Data Per Channel - ensure exactly 212 bytes
+            std::vector<char> ch_payload = cpp_ch_data.frame_bitstream_payload;
+            if (ch_payload.size() > TAtrac1Data::SoundUnitSize) {
+                ch_payload.resize(TAtrac1Data::SoundUnitSize); // Truncate
+            } else if (ch_payload.size() < TAtrac1Data::SoundUnitSize) {
+                ch_payload.resize(TAtrac1Data::SoundUnitSize, 0); // Pad
+            }
+            result.compressedDataPerChannel[ch] = ch_payload;
         }
 
         return result;
@@ -939,7 +942,63 @@ public:
 PYBIND11_MODULE(pytrac, m) {
     m.doc() = "Python bindings for ATRAC1 audio codec";
 
+    // Bind TAtrac1NNFrameParameters
+    py::class_<NAtracDEnc::NAtrac1::TAtrac1NNFrameParameters>(m, "NNFrameParameters")
+        .def(py::init<>(), "Initializes an empty NNFrameParameters object.")
+        .def_readwrite("block_mode", &NAtracDEnc::NAtrac1::TAtrac1NNFrameParameters::BlockMode,
+                       "BlockSizeMod object indicating windowing for low, mid, hi bands.")
+        .def_readwrite("bfu_amount_table_index", &NAtracDEnc::NAtrac1::TAtrac1NNFrameParameters::BfuAmountTableIndex,
+                       "Index (0-7) into TAtrac1Data::BfuAmountTab, determines active BFUs.")
+        .def_readwrite("word_lengths", &NAtracDEnc::NAtrac1::TAtrac1NNFrameParameters::WordLengths,
+                       "List of actual bits (0-16) to use for quantizing each active BFU.")
+        .def_readwrite("scale_factor_indices", &NAtracDEnc::NAtrac1::TAtrac1NNFrameParameters::ScaleFactorIndices,
+                       "List of scale factor indices (0-63) for each active BFU.")
+        .def_readwrite("quantized_spectrum", &NAtracDEnc::NAtrac1::TAtrac1NNFrameParameters::QuantizedSpectrum,
+                       "List of lists. Outer list per BFU, inner list has integer quantized MDCT coefficients for that BFU.");
+
+    // Bind TAtrac1NNBitStreamAssembler
+    py::class_<NAtracDEnc::NAtrac1::TAtrac1NNBitStreamAssembler>(m, "NNBitStreamAssembler")
+        .def(py::init<>(), "Initializes the NN bitstream assembler.")
+        .def("assemble_channel_payload", &NAtracDEnc::NAtrac1::TAtrac1NNBitStreamAssembler::AssembleChannelPayload,
+             "Assembles a single ATRAC channel payload from NN-predicted parameters. "
+             "Returns a list of characters (bytes).",
+             py::arg("params").noconvert());
+
+    // Python-friendly helper functions for mono/stereo assembly
+    m.def("assemble_mono_frame_payload",
+          [](const NAtracDEnc::NAtrac1::TAtrac1NNFrameParameters& params_ch0) {
+              NAtracDEnc::NAtrac1::TAtrac1NNBitStreamAssembler assembler;
+              std::vector<char> payload_vector = assembler.AssembleChannelPayload(params_ch0);
+              return py::bytes(payload_vector.data(), payload_vector.size());
+          },
+          "Assembles ATRAC frame payload for a single (mono) channel from NN-predicted parameters.",
+          py::arg("params_ch0").noconvert());
+
+    m.def("assemble_stereo_frame_payloads",
+          [](const NAtracDEnc::NAtrac1::TAtrac1NNFrameParameters& params_ch0,
+             const NAtracDEnc::NAtrac1::TAtrac1NNFrameParameters& params_ch1) {
+              NAtracDEnc::NAtrac1::TAtrac1NNBitStreamAssembler assembler;
+              py::list stereo_payloads;
+
+              std::vector<char> payload_vector_ch0 = assembler.AssembleChannelPayload(params_ch0);
+              stereo_payloads.append(py::bytes(payload_vector_ch0.data(), payload_vector_ch0.size()));
+
+              std::vector<char> payload_vector_ch1 = assembler.AssembleChannelPayload(params_ch1);
+              stereo_payloads.append(py::bytes(payload_vector_ch1.data(), payload_vector_ch1.size()));
+
+              return stereo_payloads;
+          },
+          "Assembles ATRAC frame payloads for stereo channels from NN-predicted parameters.",
+          py::arg("params_ch0").noconvert(), py::arg("params_ch1").noconvert());
+
     // Constants
+    // Expose BFU amount table
+    py::list bfu_amount_tab_list;
+    for(int i = 0; i < 8; ++i) {
+        bfu_amount_tab_list.append(NAtracDEnc::NAtrac1::TAtrac1Data::BfuAmountTab[i]);
+    }
+    m.attr("BFU_AMOUNT_TABLE") = bfu_amount_tab_list;
+
     m.attr("NUM_SAMPLES") = ATRAC_NUM_SAMPLES;
     m.attr("SAMPLE_RATE") = ATRAC_SAMPLE_RATE;
     m.attr("MAX_BFUS") = ATRAC_MAX_BFUS;
@@ -1086,8 +1145,20 @@ PYBIND11_MODULE(pytrac, m) {
         .def("decode_from_intermediate", &PyAtrac1FrameDecoder::decodeFromIntermediate,
              "Decode from encoder intermediate data to create training pairs",
              py::arg("encoder_data"))
-        .def("decode_frame_from_bitstream", &PyAtrac1FrameDecoder::decode_frame_from_bitstream,
-             "Decode a frame from raw per-channel bitstream data",
+        .def("decode_frame_from_bitstream",
+             [](PyAtrac1FrameDecoder &self, const py::list& per_channel_py_bytes_list) {
+                 std::vector<std::vector<char>> cpp_bitstream_data;
+                 for (const auto& py_bytes_handle : per_channel_py_bytes_list) {
+                     if (!py::isinstance<py::bytes>(py_bytes_handle)) {
+                         throw py::type_error("Expected a list of bytes objects.");
+                     }
+                     py::bytes py_b = py_bytes_handle.cast<py::bytes>();
+                     std::string s = py_b; // py::bytes can cast to std::string
+                     cpp_bitstream_data.push_back(std::vector<char>(s.begin(), s.end()));
+                 }
+                 return self.decode_frame_from_bitstream(cpp_bitstream_data);
+             },
+             "Decode a frame from raw per-channel bitstream data (list of Python bytes objects).",
              py::arg("per_channel_bitstream_data"))
         .def("qmf_to_pcm", &PyAtrac1FrameDecoder::qmfToPcm,
              "Convert QMF bands to PCM", py::arg("qmf_data"))

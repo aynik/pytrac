@@ -29,8 +29,30 @@ def process_wav_with_python_bindings(audio_data, num_channels=1):
         frame = audio_data[start_idx:end_idx]
         
         enc_data = encoder.process_frame([frame.tolist()])  # Mono
-        bitstream = enc_data.compressed_data_per_channel
-        dec_data = decoder.decode_frame_from_bitstream(bitstream)
+        
+        # Convert compressed_data_per_channel to list[bytes]
+        python_bitstream_bytes_list = []
+        for ch_raw_payload in enc_data.compressed_data_per_channel:
+            if not ch_raw_payload:  # Handle empty list case
+                python_bitstream_bytes_list.append(b'\x00' * 212)
+                continue
+
+            if isinstance(ch_raw_payload[0], str):  # If chars came as list of single-char strings
+                actual_payload = "".join(ch_raw_payload).encode('latin-1')
+            elif isinstance(ch_raw_payload[0], int):  # If chars came as list of integers
+                actual_payload = bytes(b & 0xFF for b in ch_raw_payload)
+            else:
+                actual_payload = b''
+
+            # Ensure exactly 212 bytes
+            if len(actual_payload) > 212:
+                actual_payload = actual_payload[:212]
+            elif len(actual_payload) < 212:
+                actual_payload = actual_payload.ljust(212, b'\x00')
+
+            python_bitstream_bytes_list.append(actual_payload)
+        
+        dec_data = decoder.decode_frame_from_bitstream(python_bitstream_bytes_list)
         decoded_pcm.extend(dec_data.pcm_output[0])
             
     return np.array(decoded_pcm)

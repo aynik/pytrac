@@ -51,13 +51,30 @@ def encode_and_get_data(num_channels):
     # We can assert this here or in tests if needed.
     # For PCM output comparison, we'll use original_audio_data_np.
 
-    per_channel_bitstream_data = encoder_intermediate_data.compressed_data_per_channel
-    
-    # Basic sanity check for bitstream
-    for ch_data in per_channel_bitstream_data:
-        assert len(ch_data) > 0, "Encoder produced an empty bitstream for a channel."
-            
-    return original_audio_data_np, encoder_intermediate_data, per_channel_bitstream_data
+    # Convert compressed_data_per_channel to list[bytes]
+    list_of_python_bytes = []
+    for ch_raw_payload in encoder_intermediate_data.compressed_data_per_channel:
+        if not ch_raw_payload:  # Handle empty list case
+            list_of_python_bytes.append(b'\x00' * 212)
+            continue
+
+        if isinstance(ch_raw_payload[0], str):  # If chars came as list of single-char strings
+            temp_str = "".join(ch_raw_payload)
+            byte_values = temp_str.encode('latin-1')
+        elif isinstance(ch_raw_payload[0], int):  # If chars came as list of integers
+            byte_values = bytes(b & 0xFF for b in ch_raw_payload)
+        else:
+            raise TypeError(f"Unexpected element type in compressedDataPerChannel: {type(ch_raw_payload[0])}")
+
+        # Ensure exactly 212 bytes
+        if len(byte_values) > 212:
+            byte_values = byte_values[:212]
+        elif len(byte_values) < 212:
+            byte_values = byte_values.ljust(212, b'\x00')
+
+        list_of_python_bytes.append(byte_values)
+
+    return original_audio_data_np, encoder_intermediate_data, list_of_python_bytes
 # --- PyAtrac1FrameProcessor Tests ---
 @pytest.fixture
 def mono_encoder():
@@ -454,8 +471,7 @@ def get_generated_atrac1_bitstream_frame(num_channels):
     """
     Generates an ATRAC1 bitstream frame using the FrameProcessor.
     Returns:
-        per_channel_bitstream_data (List[List[int]]): List of byte lists per channel.
-        frame_size_bytes_per_channel (List[int]): List of frame sizes in bytes per channel.
+        list_of_python_bytes (List[bytes]): List of Python bytes objects per channel.
     """
     if num_channels == 1:
         encoder = pytrac.FrameProcessor(1)
@@ -467,14 +483,30 @@ def get_generated_atrac1_bitstream_frame(num_channels):
     audio_data = generate_audio_frame(num_channels, pytrac.NUM_SAMPLES)
     intermediate_data = encoder.process_frame(audio_data)
 
-    per_channel_bitstream_data = intermediate_data.compressed_data_per_channel
-    frame_size_bytes_per_channel = [len(ch_data) for ch_data in per_channel_bitstream_data]
-    
-    # Ensure some data was produced (basic sanity check)
-    for size in frame_size_bytes_per_channel:
-        assert size > 0, "Encoder produced an empty bitstream for a channel."
+    # Convert intermediate_data.compressed_data_per_channel (list[list[char]]) to list[bytes]
+    list_of_python_bytes = []
+    for ch_raw_payload in intermediate_data.compressed_data_per_channel:
+        if not ch_raw_payload:  # Handle empty list case
+            list_of_python_bytes.append(b'\x00' * 212)
+            continue
 
-    return per_channel_bitstream_data, frame_size_bytes_per_channel
+        if isinstance(ch_raw_payload[0], str):  # If chars came as list of single-char strings
+            temp_str = "".join(ch_raw_payload)
+            byte_values = temp_str.encode('latin-1')
+        elif isinstance(ch_raw_payload[0], int):  # If chars came as list of integers
+            byte_values = bytes(b & 0xFF for b in ch_raw_payload)
+        else:
+            raise TypeError(f"Unexpected element type in compressedDataPerChannel: {type(ch_raw_payload[0])}")
+
+        # Ensure exactly 212 bytes
+        if len(byte_values) > 212:
+            byte_values = byte_values[:212]
+        elif len(byte_values) < 212:
+            byte_values = byte_values.ljust(212, b'\x00')
+
+        list_of_python_bytes.append(byte_values)
+
+    return list_of_python_bytes
 
 @pytest.fixture
 def mono_decoder():
@@ -494,8 +526,8 @@ def test_decoder_initialization(mono_decoder, stereo_decoder):
 
 def test_decoder_block_size_log_count_mono(mono_decoder):
     """Test block_size_log_count_per_channel for mono audio."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=1)
-    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream)
+    per_channel_bitstream_bytes = get_generated_atrac1_bitstream_frame(num_channels=1)
+    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream_bytes)
     
     block_log_count = decoder_intermediate_data.block_size_log_count
     assert block_log_count is not None
@@ -508,8 +540,8 @@ def test_decoder_block_size_log_count_mono(mono_decoder):
 
 def test_decoder_block_size_log_count_stereo(stereo_decoder):
     """Test block_size_log_count_per_channel for stereo audio."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=2)
-    decoder_intermediate_data = stereo_decoder.decode_frame_from_bitstream(per_channel_bitstream)
+    per_channel_bitstream_bytes = get_generated_atrac1_bitstream_frame(num_channels=2)
+    decoder_intermediate_data = stereo_decoder.decode_frame_from_bitstream(per_channel_bitstream_bytes)
 
     block_log_count = decoder_intermediate_data.block_size_log_count
     assert block_log_count is not None
@@ -523,8 +555,8 @@ def test_decoder_block_size_log_count_stereo(stereo_decoder):
 
 def test_decoder_scale_factor_indices_mono(mono_decoder):
     """Test scale_factor_indices_per_channel for mono audio."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=1)
-    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream)
+    per_channel_bitstream_bytes = get_generated_atrac1_bitstream_frame(num_channels=1)
+    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream_bytes)
 
     sf_indices = decoder_intermediate_data.scale_factor_indices
     assert sf_indices is not None
@@ -542,8 +574,8 @@ def test_decoder_scale_factor_indices_mono(mono_decoder):
 
 def test_decoder_scale_factor_indices_stereo(stereo_decoder):
     """Test scale_factor_indices_per_channel for stereo audio."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=2)
-    decoder_intermediate_data = stereo_decoder.decode_frame_from_bitstream(per_channel_bitstream)
+    per_channel_bitstream_bytes = get_generated_atrac1_bitstream_frame(num_channels=2)
+    decoder_intermediate_data = stereo_decoder.decode_frame_from_bitstream(per_channel_bitstream_bytes)
 
     sf_indices = decoder_intermediate_data.scale_factor_indices
     assert sf_indices is not None
@@ -559,8 +591,8 @@ def test_decoder_scale_factor_indices_stereo(stereo_decoder):
 
 def test_decoder_bits_per_bfu_mono(mono_decoder):
     """Test bits_per_bfu_per_channel for mono audio."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=1)
-    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream)
+    per_channel_bitstream_bytes = get_generated_atrac1_bitstream_frame(num_channels=1)
+    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream_bytes)
 
     bits_per_bfu = decoder_intermediate_data.bits_per_bfu
     assert bits_per_bfu is not None
@@ -577,8 +609,8 @@ def test_decoder_bits_per_bfu_mono(mono_decoder):
 
 def test_decoder_bits_per_bfu_stereo(stereo_decoder):
     """Test bits_per_bfu_per_channel for stereo audio."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=2)
-    decoder_intermediate_data = stereo_decoder.decode_frame_from_bitstream(per_channel_bitstream)
+    per_channel_bitstream_bytes = get_generated_atrac1_bitstream_frame(num_channels=2)
+    decoder_intermediate_data = stereo_decoder.decode_frame_from_bitstream(per_channel_bitstream_bytes)
 
     bits_per_bfu = decoder_intermediate_data.bits_per_bfu
     assert bits_per_bfu is not None
@@ -594,8 +626,8 @@ def test_decoder_bits_per_bfu_stereo(stereo_decoder):
 
 def test_decoder_parsed_quantized_values_mono(mono_decoder):
     """Test parsed_quantized_values_per_channel for mono audio."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=1)
-    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream)
+    per_channel_bitstream_bytes = get_generated_atrac1_bitstream_frame(num_channels=1)
+    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream_bytes)
 
     quant_vals = decoder_intermediate_data.parsed_quantized_values
     assert quant_vals is not None
@@ -618,8 +650,8 @@ def test_decoder_parsed_quantized_values_mono(mono_decoder):
 
 def test_decoder_parsed_quantized_values_stereo(stereo_decoder):
     """Test parsed_quantized_values_per_channel for stereo audio."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=2)
-    decoder_intermediate_data = stereo_decoder.decode_frame_from_bitstream(per_channel_bitstream)
+    per_channel_bitstream_bytes = get_generated_atrac1_bitstream_frame(num_channels=2)
+    decoder_intermediate_data = stereo_decoder.decode_frame_from_bitstream(per_channel_bitstream_bytes)
 
     quant_vals = decoder_intermediate_data.parsed_quantized_values
     assert quant_vals is not None
@@ -643,8 +675,8 @@ def test_decoder_parsed_quantized_values_stereo(stereo_decoder):
 
 def test_decoder_mdct_specs_mono(mono_decoder):
     """Test mdct_specs_per_channel for mono audio (dequantized MDCT)."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=1)
-    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream)
+    per_channel_bitstream_bytes = get_generated_atrac1_bitstream_frame(num_channels=1)
+    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream_bytes)
 
     mdct_specs = decoder_intermediate_data.mdct_specs
     assert mdct_specs is not None
@@ -659,7 +691,7 @@ def test_decoder_mdct_specs_mono(mono_decoder):
 
 def test_decoder_mdct_specs_stereo(stereo_decoder):
     """Test mdct_specs_per_channel for stereo audio (dequantized MDCT)."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=2)
+    per_channel_bitstream = get_generated_atrac1_bitstream_frame(num_channels=2)
     decoder_intermediate_data = stereo_decoder.decode_frame_from_bitstream(per_channel_bitstream)
 
     mdct_specs = decoder_intermediate_data.mdct_specs
@@ -675,8 +707,8 @@ def test_decoder_mdct_specs_stereo(stereo_decoder):
 
 def test_decoder_get_decoded_audio_mono(mono_decoder):
     """Test get_decoded_audio() for mono audio."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=1)
-    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream)
+    per_channel_bitstream_bytes = get_generated_atrac1_bitstream_frame(num_channels=1)
+    decoder_intermediate_data = mono_decoder.decode_frame_from_bitstream(per_channel_bitstream_bytes)
     decoded_audio = decoder_intermediate_data.pcm_output
 
     assert decoded_audio is not None
@@ -690,8 +722,8 @@ def test_decoder_get_decoded_audio_mono(mono_decoder):
 
 def test_decoder_get_decoded_audio_stereo(stereo_decoder):
     """Test get_decoded_audio() for stereo audio."""
-    per_channel_bitstream, frame_sizes = get_generated_atrac1_bitstream_frame(num_channels=2)
-    decoder_intermediate_data = stereo_decoder.decode_frame_from_bitstream(per_channel_bitstream)
+    per_channel_bitstream_bytes = get_generated_atrac1_bitstream_frame(num_channels=2)
+    decoder_intermediate_data = stereo_decoder.decode_frame_from_bitstream(per_channel_bitstream_bytes)
     decoded_audio = decoder_intermediate_data.pcm_output
 
     assert decoded_audio is not None
@@ -1319,3 +1351,134 @@ def test_consistency_pcm_output_mono_direct_mdct(mono_decoder):
         f"Direct MDCT scaling factor {k_optimal_direct:.6f} outside expected range"
     assert 0.45 < rms_error_scaled_direct < 0.55, \
         f"Direct MDCT scaled RMS error {rms_error_scaled_direct:.6f} outside expected range"
+
+
+# --- NN Bitstream Assembly Tests ---
+
+def create_default_nn_frame_parameters(bfu_amount_table_index=7):
+    """Creates a default NNFrameParameters object with specified BFU amount index."""
+    params = pytrac.NNFrameParameters()
+    params.block_mode = pytrac.BlockSizeMod(False, False, False)  # All long windows
+    params.bfu_amount_table_index = bfu_amount_table_index
+    
+    num_active_bfus = pytrac.BFU_AMOUNT_TABLE[bfu_amount_table_index]
+    params.word_lengths = [0] * num_active_bfus
+    params.scale_factor_indices = [0] * num_active_bfus
+    params.quantized_spectrum = [[] for _ in range(num_active_bfus)]
+    
+    return params, num_active_bfus
+
+def test_nn_frame_parameters_creation():
+    """Test basic creation and attribute access of NNFrameParameters."""
+    params, num_active_bfus = create_default_nn_frame_parameters()
+    assert isinstance(params.block_mode, pytrac.BlockSizeMod)
+    assert params.bfu_amount_table_index == 7
+    assert len(params.word_lengths) == num_active_bfus
+    assert len(params.scale_factor_indices) == num_active_bfus
+    assert len(params.quantized_spectrum) == num_active_bfus
+
+def test_assemble_mono_payload_basic():
+    """Test assembly of a mono payload with minimal parameters."""
+    params, num_active_bfus = create_default_nn_frame_parameters(bfu_amount_table_index=0)  # 20 BFUs
+    
+    # Set some test data
+    if num_active_bfus > 0:
+        params.word_lengths[0] = 2  # 2 bits
+        params.scale_factor_indices[0] = 10
+        params.quantized_spectrum[0] = [1] * pytrac.SPECS_PER_BLOCK[0]  # Fill BFU 0 with 1s
+
+    payload = pytrac.assemble_mono_frame_payload(params)
+    assert isinstance(payload, bytes)
+    assert len(payload) == 212  # Standard ATRAC1 frame size
+
+def test_assemble_stereo_payloads_basic():
+    """Test assembly of stereo payloads."""
+    params_ch0, _ = create_default_nn_frame_parameters(bfu_amount_table_index=0)
+    params_ch1, _ = create_default_nn_frame_parameters(bfu_amount_table_index=0)
+    
+    # Set some test data for ch1
+    if len(params_ch1.word_lengths) > 1:
+        params_ch1.word_lengths[1] = 2
+        params_ch1.scale_factor_indices[1] = 5
+        params_ch1.quantized_spectrum[1] = [-1] * pytrac.SPECS_PER_BLOCK[1]
+
+    payloads = pytrac.assemble_stereo_frame_payloads(params_ch0, params_ch1)
+    assert isinstance(payloads, list)
+    assert len(payloads) == 2
+    assert all(isinstance(p, bytes) for p in payloads)
+    assert all(len(p) == 212 for p in payloads)
+
+@pytest.mark.parametrize("num_channels", [1, 2])
+def test_nn_round_trip_window_mode(num_channels, mono_decoder, stereo_decoder):
+    """Test window mode consistency through NN assembler and decoder."""
+    decoder = mono_decoder if num_channels == 1 else stereo_decoder
+    
+    test_modes = [
+        (pytrac.BlockSizeMod(False, False, False), [0, 0, 0]),  # All long: LogCount will be [0,0,0]
+        (pytrac.BlockSizeMod(True, True, True),   [2, 2, 3]),     # All short: LogCount will be [2,2,3]
+        (pytrac.BlockSizeMod(True, False, True),  [2, 0, 3])      # Mixed: LogCount will be [2,0,3]
+    ]
+
+    for block_mode, expected_log_counts in test_modes:
+        params_ch0, _ = create_default_nn_frame_parameters()
+        params_ch0.block_mode = block_mode
+        
+        if num_channels == 1:
+            payloads = [pytrac.assemble_mono_frame_payload(params_ch0)]
+        else:
+            params_ch1 = create_default_nn_frame_parameters()[0]
+            params_ch1.block_mode = block_mode
+            payloads = pytrac.assemble_stereo_frame_payloads(params_ch0, params_ch1)
+
+        decoded_data = decoder.decode_frame_from_bitstream(payloads)
+
+        for ch in range(num_channels):
+            assert decoded_data.block_size_log_count[ch][0] == expected_log_counts[0]
+            assert decoded_data.block_size_log_count[ch][1] == expected_log_counts[1]
+            assert decoded_data.block_size_log_count[ch][2] == expected_log_counts[2]
+
+@pytest.mark.parametrize("num_channels", [1, 2])
+def test_nn_round_trip_parameters(num_channels, mono_decoder, stereo_decoder):
+    """Test parameter consistency through NN assembler and decoder."""
+    decoder = mono_decoder if num_channels == 1 else stereo_decoder
+    bfu_amount_idx = 0  # Use 20 BFUs for testing
+    params_ch0, num_active_bfus = create_default_nn_frame_parameters(bfu_amount_idx)
+    
+    # Set test data for a few BFUs
+    test_bfus = {
+        0: {"wl": 4, "sf": 10, "qvs": [1, -1, 2, -2]},
+        1: {"wl": 0, "sf": 5, "qvs": []},
+        2: {"wl": 2, "sf": 15, "qvs": [1, 0, -1, 1]}
+    }
+
+    for bfu_idx, data in test_bfus.items():
+        if bfu_idx < num_active_bfus:
+            params_ch0.word_lengths[bfu_idx] = data["wl"]
+            params_ch0.scale_factor_indices[bfu_idx] = data["sf"]
+            params_ch0.quantized_spectrum[bfu_idx] = data["qvs"]
+
+    if num_channels == 1:
+        payloads = [pytrac.assemble_mono_frame_payload(params_ch0)]
+    else:
+        params_ch1 = create_default_nn_frame_parameters(bfu_amount_idx)[0]
+        payloads = pytrac.assemble_stereo_frame_payloads(params_ch0, params_ch1)
+
+    decoded_data = decoder.decode_frame_from_bitstream(payloads)
+
+    for ch in range(num_channels):
+        # Check BFU amount index (implicit via num_active_bfus)
+        assert len(decoded_data.bits_per_bfu[ch]) >= num_active_bfus
+        
+        for bfu_idx in range(num_active_bfus):
+            # Check word lengths
+            expected_wl = params_ch0.word_lengths[bfu_idx]
+            decoded_idwl = decoded_data.bits_per_bfu[ch][bfu_idx]
+            expected_idwl = 0 if expected_wl <= 1 else (expected_wl - 1)
+            assert decoded_idwl == expected_idwl
+            
+            # Check scale factors
+            assert decoded_data.scale_factor_indices[ch][bfu_idx] == params_ch0.scale_factor_indices[bfu_idx]
+            
+            # Check quantized values
+            if expected_wl > 0:
+                assert decoded_data.parsed_quantized_values[ch][bfu_idx][:len(params_ch0.quantized_spectrum[bfu_idx])] == params_ch0.quantized_spectrum[bfu_idx]
