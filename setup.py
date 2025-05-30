@@ -95,6 +95,7 @@ def get_libraries_and_flags():
     extra_compile_args = []
     extra_link_args = []
     include_dirs = []
+    define_macros = []
     
     # Get libsndfile info from pkg-config
     try:
@@ -122,15 +123,25 @@ def get_libraries_and_flags():
         # Fallback
         libraries.append('sndfile')
         
+    # Initialize define_macros list
+    define_macros = []
+    
     # Platform-specific
     if platform.system() == 'Linux':
-        libraries.append('m')  # Math library
+        libraries.extend(['m'])  # Math library
+        extra_compile_args.extend(['-fopenmp', '-O3', '-DNDEBUG', '-std=c++17'])
+        extra_link_args.extend(['-fopenmp'])
+        define_macros.append(('_OPENMP', '1'))
     elif platform.system() == 'Darwin':
-        pass  # macOS
+        # macOS - use clang's OpenMP
+        extra_compile_args.extend(['-Xpreprocessor', '-fopenmp', '-O3', '-DNDEBUG', '-std=c++17'])
+        extra_link_args.extend(['-lomp'])
+        define_macros.append(('_OPENMP', '1'))
     elif platform.system() == 'Windows':
-        extra_compile_args.append('/D_USE_MATH_DEFINES')
+        extra_compile_args.extend(['/openmp', '/O2', '/DNDEBUG', '/std:c++17'])
+        define_macros.append(('_OPENMP', '1'))
         
-    return libraries, library_dirs, extra_compile_args, extra_link_args, include_dirs
+    return libraries, library_dirs, extra_compile_args, extra_link_args, include_dirs, define_macros
 
 
 class CustomBuildExt(build_ext):
@@ -192,7 +203,7 @@ check_dependencies()
 # Get source files and includes
 cpp_sources, c_sources = get_atracdenc_sources()
 include_dirs = get_include_dirs()
-libraries, library_dirs, extra_compile_args, extra_link_args, sndfile_includes = get_libraries_and_flags()
+libraries, library_dirs, extra_compile_args, extra_link_args, sndfile_includes, define_macros = get_libraries_and_flags()
 
 # Add sndfile include directories
 include_dirs.extend(sndfile_includes)
@@ -214,7 +225,7 @@ pytrac_ext = Pybind11Extension(
     define_macros=define_macros,
     extra_compile_args=extra_compile_args,
     extra_link_args=extra_link_args,
-    cxx_std=14,
+    cxx_std=17,
 )
 
 ext_modules = [pytrac_ext]

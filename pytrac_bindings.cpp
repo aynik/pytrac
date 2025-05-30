@@ -14,6 +14,10 @@
 #include <string>
 #include <cmath>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 // ATRAC1 headers
 #include "atrac1denc.h"
 #include "aea.h"
@@ -251,9 +255,9 @@ public:
                 static_cast<uint8_t>(eff_block_size_mod.LogCount[1]),
                 static_cast<uint8_t>(eff_block_size_mod.LogCount[2])
             };
-            result.enc_log_count_low[ch] = (eff_block_size_mod.LogCount[0] == 1);
-            result.enc_log_count_mid[ch] = (eff_block_size_mod.LogCount[1] == 1);
-            result.enc_log_count_hi[ch] = (eff_block_size_mod.LogCount[2] == 1);
+            result.enc_log_count_low[ch] = (eff_block_size_mod.LogCount[0] != 0);
+            result.enc_log_count_mid[ch] = (eff_block_size_mod.LogCount[1] != 0);
+            result.enc_log_count_hi[ch] = (eff_block_size_mod.LogCount[2] != 0);
             
             uint32_t current_window_mask = 0;
             if (eff_block_size_mod.LogCount[0]) current_window_mask |= 1; // Low band short
@@ -426,16 +430,21 @@ public:
         }
         
         for (uint32_t channel = 0; channel < channels; ++channel) {
-            TAtrac1Data::TBlockSizeMod blockSize(encoderData.windowMask[channel] & 1,
-                                 encoderData.windowMask[channel] & 2,
-                                 encoderData.windowMask[channel] & 4);
+            // Construct TBlockSizeMod from encoderData.windowMask
+            bool lowShort = (encoderData.windowMask[channel] & 1) != 0;
+            bool midShort = (encoderData.windowMask[channel] & 2) != 0;
+            bool hiShort  = (encoderData.windowMask[channel] & 4) != 0;
+            TAtrac1Data::TBlockSizeMod blockSize(lowShort, midShort, hiShort);
+            
             result.block_size_log_count[channel] = {
                 static_cast<uint8_t>(blockSize.LogCount[0]),
                 static_cast<uint8_t>(blockSize.LogCount[1]),
                 static_cast<uint8_t>(blockSize.LogCount[2])
             };
             
-            IMdct(&result.mdctSpecs[channel][0], blockSize,
+            // Use a local MDCT processor for decodeFromIntermediate
+            NAtracDEnc::TAtrac1MDCT local_mdct_processor_for_intermediate;
+            local_mdct_processor_for_intermediate.IMdct(&result.mdctSpecs[channel][0], blockSize,
                   &PcmBufLow[channel][0], &PcmBufMid[channel][0], &PcmBufHi[channel][0]);
             
             // Assign correct QMF band sizes from IMDCT output buffers
@@ -482,6 +491,7 @@ public:
         result.qmfHi.resize(channels);
         result.pcmOutput.resize(channels);
 
+        #pragma omp parallel for num_threads(channels)
         for (uint32_t channel = 0; channel < channels; ++channel) {
             if (per_channel_bitstream_data[channel].empty()) {
                 // Handle empty bitstream for a channel if necessary, or throw error
@@ -501,11 +511,15 @@ public:
                 per_channel_bitstream_data[channel].size() // Size in BYTES
             );
 
+            // Create thread-local instances
+            NAtrac1::TAtrac1Dequantiser local_dequantiser;
+            NAtracDEnc::TAtrac1MDCT local_mdct_processor;
+            
+            local_dequantiser.Dequant(&bitstream_reader, result.mdctSpecs[channel].data(), channel);
+            
             // Call Dequant to parse the bitstream and populate result.mdctSpecs[channel]
-            Dequantiser.Dequant(&bitstream_reader, result.mdctSpecs[channel].data(), channel);
-
-            // Retrieve parsed data from Dequantiser
-            TAtrac1Data::TBlockSizeMod parsed_mode = Dequantiser.GetBlockSizeMod(channel);
+            // Retrieve parsed data from local dequantizer
+            TAtrac1Data::TBlockSizeMod parsed_mode = local_dequantiser.GetBlockSizeMod(channel);
             result.block_size_log_count[channel] = {
                 static_cast<uint8_t>(parsed_mode.LogCount[0]),
                 static_cast<uint8_t>(parsed_mode.LogCount[1]),
@@ -519,11 +533,11 @@ public:
             if (parsed_mode.LogCount[2]) current_window_mask |= 4;
             result.windowMask[channel] = current_window_mask;
 
-            result.bitsPerBfu[channel] = Dequantiser.get_parsed_word_lengths(channel);
-            result.scaleFactorIndices[channel] = Dequantiser.get_parsed_scale_factor_indices(channel);
-            result.parsed_quantized_values[channel] = Dequantiser.get_parsed_quantized_values(channel);
+            result.bitsPerBfu[channel] = local_dequantiser.get_parsed_word_lengths(channel);
+            result.scaleFactorIndices[channel] = local_dequantiser.get_parsed_scale_factor_indices(channel);
+            result.parsed_quantized_values[channel] = local_dequantiser.get_parsed_quantized_values(channel);
             
-            IMdct(&result.mdctSpecs[channel][0], parsed_mode, // Use parsed_mode here
+            local_mdct_processor.IMdct(&result.mdctSpecs[channel][0], parsed_mode,
                   &PcmBufLow[channel][0], &PcmBufMid[channel][0], &PcmBufHi[channel][0]);
             
             result.qmfLow[channel].assign(&PcmBufLow[channel][0], &PcmBufLow[channel][128]);
@@ -537,6 +551,79 @@ public:
         return result;
     }
     
+py::array_t<float> decode_snippet_from_params_list(
+        const py::list& list_of_nn_frame_params_py,
+        int num_output_channels,
+        int expected_total_samples
+    ) {
+        std::vector<NAtrac1::TAtrac1NNFrameParameters> cpp_params_list;
+        {
+            py::gil_scoped_acquire acquire_gil;
+            if (py::len(list_of_nn_frame_params_py) > 0) {
+                 cpp_params_list.reserve(py::len(list_of_nn_frame_params_py));
+            }
+            for (const auto& py_param_handle : list_of_nn_frame_params_py) {
+                if (!py_param_handle || py_param_handle.is_none()) {
+                     throw std::runtime_error("Encountered None or invalid object in NNFrameParameters list.");
+                }
+                cpp_params_list.push_back(py_param_handle.cast<const NAtrac1::TAtrac1NNFrameParameters&>());
+            }
+        }
+
+        std::vector<float> pcm_output_snippet;
+        if (expected_total_samples > 0) {
+            pcm_output_snippet.reserve(expected_total_samples);
+        } else if (!cpp_params_list.empty()) {
+            pcm_output_snippet.reserve(cpp_params_list.size() * ATRAC_NUM_SAMPLES);
+        }
+
+        Atrac1SynthesisFilterBank<float> synthesisFilterBank[2];
+        float pcmBufLow[2][256 + 16];
+        float pcmBufMid[2][256 + 16];
+        float pcmBufHi[2][512 + 16];
+        
+        for (int ch_init = 0; ch_init < num_output_channels && ch_init < 2; ++ch_init) {
+            memset(pcmBufLow[ch_init], 0, sizeof(pcmBufLow[ch_init]));
+            memset(pcmBufMid[ch_init], 0, sizeof(pcmBufMid[ch_init]));
+            memset(pcmBufHi[ch_init], 0, sizeof(pcmBufHi[ch_init]));
+        }
+
+        NAtrac1::TAtrac1Dequantiser dequantiser;
+        NAtracDEnc::TAtrac1MDCT mdct_processor;
+        NAtracDEnc::NAtrac1::TAtrac1NNBitStreamAssembler assembler;
+        std::vector<float> mdct_specs_for_frame(ATRAC_NUM_SAMPLES);
+
+        for (const auto& frame_params_cpp : cpp_params_list) {
+            std::vector<char> payload_char_vector = assembler.AssembleChannelPayload(frame_params_cpp);
+            NBitStream::TBitStream bitstream_reader(payload_char_vector.data(), payload_char_vector.size());
+
+            dequantiser.Dequant(&bitstream_reader, mdct_specs_for_frame.data(), 0);
+            NAtrac1::TAtrac1Data::TBlockSizeMod parsed_mode = dequantiser.GetBlockSizeMod(0);
+            
+            mdct_processor.IMdct(mdct_specs_for_frame.data(), parsed_mode,
+                                 pcmBufLow[0], pcmBufMid[0], pcmBufHi[0]);
+            
+            std::vector<float> pcm_frame_output(ATRAC_NUM_SAMPLES);
+            synthesisFilterBank[0].Synthesis(pcm_frame_output.data(), pcmBufLow[0], pcmBufMid[0], pcmBufHi[0]);
+            
+            pcm_output_snippet.insert(pcm_output_snippet.end(), pcm_frame_output.begin(), pcm_frame_output.end());
+        }
+        
+        if (expected_total_samples > 0 && pcm_output_snippet.size() < static_cast<size_t>(expected_total_samples)) {
+            pcm_output_snippet.resize(expected_total_samples, 0.0f);
+        } else if (expected_total_samples > 0 && pcm_output_snippet.size() > static_cast<size_t>(expected_total_samples)) {
+            pcm_output_snippet.resize(expected_total_samples);
+        }
+
+        py::gil_scoped_acquire acquire_gil_for_return;
+        py::array_t<float> result_array(static_cast<py::ssize_t>(pcm_output_snippet.size()));
+        if (!pcm_output_snippet.empty()) {
+            float* ptr = static_cast<float*>(result_array.request().ptr);
+            std::memcpy(ptr, pcm_output_snippet.data(), pcm_output_snippet.size() * sizeof(float));
+        }
+        return result_array;
+    }
+
     // Individual component access
     py::array_t<float> qmfToPcm(py::array_t<float> qmfData) {
         auto buf = qmfData.request();
@@ -585,8 +672,9 @@ public:
         for (uint32_t ch = 0; ch < numChannels; ++ch) {
             TAtrac1Data::TBlockSizeMod blockSize(maskPtr[ch] & 1, maskPtr[ch] & 2, maskPtr[ch] & 4);
             
-            // IMdct populates PcmBufLow/Mid/Hi with 128/128/256 samples respectively
-            IMdct(&mdctPtr[ch * 512], blockSize,
+            // Use a local MDCT processor for thread safety
+            NAtracDEnc::TAtrac1MDCT local_mdct_processor_for_mdctToQmf;
+            local_mdct_processor_for_mdctToQmf.IMdct(&mdctPtr[ch * 512], blockSize,
                   &PcmBufLow[ch][0], &PcmBufMid[ch][0], &PcmBufHi[ch][0]);
             
             // Pack into result: low(128) + mid(128) + hi(256)
@@ -1156,14 +1244,26 @@ PYBIND11_MODULE(pytrac, m) {
                      std::string s = py_b; // py::bytes can cast to std::string
                      cpp_bitstream_data.push_back(std::vector<char>(s.begin(), s.end()));
                  }
-                 return self.decode_frame_from_bitstream(cpp_bitstream_data);
+
+                 PyDecoderIntermediateData result;
+                 { // Scope for GIL release
+                     py::gil_scoped_release release_gil;
+                     result = self.decode_frame_from_bitstream(cpp_bitstream_data);
+                 }
+                 return result;
              },
              "Decode a frame from raw per-channel bitstream data (list of Python bytes objects).",
              py::arg("per_channel_bitstream_data"))
         .def("qmf_to_pcm", &PyAtrac1FrameDecoder::qmfToPcm,
              "Convert QMF bands to PCM", py::arg("qmf_data"))
         .def("mdct_to_qmf", &PyAtrac1FrameDecoder::mdctToQmf,
-             "Convert MDCT to QMF bands", py::arg("mdct_data"), py::arg("window_masks"));
+             "Convert MDCT to QMF bands", py::arg("mdct_data"), py::arg("window_masks"))
+        .def("decode_snippet_from_params_list", &PyAtrac1FrameDecoder::decode_snippet_from_params_list,
+             "Decode a snippet from a list of NNFrameParameters objects",
+             py::arg("list_of_nn_frame_params"),
+             py::arg("num_output_channels") = 1,
+             py::arg("expected_total_samples") = 0,
+             py::call_guard<py::gil_scoped_release>());
 
     // Bitstream generation and parsing
     py::class_<PyBitstreamWriter>(m, "BitstreamWriter")

@@ -40,3 +40,4 @@ include = ["pytrac*"]
 
 [tool.setuptools.package-data]
 pytrac = ["*.so", "*.pyd", "*.dll"]
+
