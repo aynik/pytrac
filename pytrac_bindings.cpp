@@ -70,6 +70,8 @@ struct PyEncoderIntermediateData {
     
     // Bit allocation per BFU
     std::vector<std::vector<uint32_t>> bitsPerBfu; // [channel][bfu]
+
+    std::vector<uint32_t> bfuAmountTableIdxUsed;
     
     // Quantized integer values (what actually goes in bitstream)
     std::vector<std::vector<std::vector<int32_t>>> quantizedValues; // [channel][bfu][values]
@@ -203,6 +205,7 @@ public:
         result.block_size_log_count.resize(numChannels);
         result.scaledBlocks.resize(numChannels);
         result.bitsPerBfu.resize(numChannels);
+        result.bfuAmountTableIdxUsed.resize(numChannels);
         result.quantizedValues.resize(numChannels);
         result.quantizationError.resize(numChannels);
         result.pcmInput.resize(numChannels);
@@ -273,6 +276,8 @@ public:
             if (result.bitsPerBfu[ch].size() < ATRAC_MAX_BFUS) {
                 result.bitsPerBfu[ch].resize(ATRAC_MAX_BFUS, 0); // Pad with 0
             }
+
+            result.bfuAmountTableIdxUsed[ch] = cpp_ch_data.final_bfu_amount_table_idx;
 
             result.quantizedValues[ch].resize(ATRAC_MAX_BFUS);
             result.quantizationError[ch].resize(ATRAC_MAX_BFUS);
@@ -1175,6 +1180,7 @@ PYBIND11_MODULE(pytrac, m) {
         .def_readwrite("block_size_log_count", &PyEncoderIntermediateData::block_size_log_count)
         .def_readwrite("scaled_blocks", &PyEncoderIntermediateData::scaledBlocks)
         .def_readwrite("bits_per_bfu", &PyEncoderIntermediateData::bitsPerBfu)
+        .def_readwrite("bfu_amount_table_idx_used", &PyEncoderIntermediateData::bfuAmountTableIdxUsed) 
         .def_readwrite("quantized_values", &PyEncoderIntermediateData::quantizedValues)
         .def_readwrite("quantization_error", &PyEncoderIntermediateData::quantizationError)
         .def_readwrite("pcm_input", &PyEncoderIntermediateData::pcmInput)
